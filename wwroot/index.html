@@ -1,0 +1,906 @@
+<!-- path: wwroot/index.html -->
+<!DOCTYPE html>
+<html lang="pt-BR">
+ <head>
+   <meta charset="utf-8" />
+   <title>DRE Software — Vanilla JS (Responsivo)</title>
+   <meta name="viewport" content="width=device-width, initial-scale=1" />
+   <script src="https://cdn.tailwindcss.com"></script>
+   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+   <script src="https://unpkg.com/lucide@latest"></script>
+   <style>
+     .switch{width:44px;height:24px;border-radius:9999px;padding:2px;cursor:pointer;background:#d1d5db;transition:background .2s}
+     .switch[data-on="true"]{background:#111827}
+     .switch .knob{width:20px;height:20px;border-radius:9999px;background:#fff;transform:translateX(0);transition:transform .2s}
+     .switch[data-on="true"] .knob{transform:translateX(20px)}
+     .card{background:#fff;border:1px solid rgb(229 231 235);border-radius:1rem;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+     /* badge de informação (explicações dos gráficos) */
+     details.info{display:inline-block;margin-left:.25rem;vertical-align:middle}
+     details.info>summary{list-style:none;cursor:pointer;display:inline-flex;align-items:center;gap:.25rem}
+     details.info>summary::-webkit-details-marker{display:none}
+     details.info>div{max-width:36rem;margin-top:.5rem;padding:.5rem .75rem;border:1px solid #e5e7eb;border-radius:.75rem;background:#f9fafb;font-size:.8rem;color:#374151}
+   </style>
+ </head>
+ <body class="min-h-screen bg-gray-50 text-gray-900">
+   <div id="app"></div>
+
+   <script>
+     /* ===================== Utils & Consts ===================== */
+     const BRL = new Intl.NumberFormat("pt-BR",{style:"currency",currency:"BRL"});
+     const PCT = new Intl.NumberFormat("pt-BR",{style:"percent",maximumFractionDigits:1});
+     const uid = (p="id") => `${p}_${Math.random().toString(36).slice(2,9)}`;
+     const monthKey = (iso)=>{const d=new Date(iso);return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`};
+     const parseNumberBR=(v)=>typeof v==="number"?v:Number(String(v).replace(/\./g,"").replace(",","."))||Number(v)||0;
+
+     const DRE_LABELS={
+       RECEITA_BRUTA:"Receita Bruta",
+       DEDUCOES_VENDAS:"(-) Deducoes de Vendas",
+       RECEITA_LIQUIDA:"= Receita Liquida",
+       CPV_CSP:"(-) CPV/CSP",
+       LUCRO_BRUTO:"= Lucro Bruto",
+       DESPESAS_VENDAS:"(-) Despesas com Vendas",
+       DESPESAS_ADMIN:"(-) Despesas Administrativas",
+       DEPRECIACAO_AMORTIZACAO:"(-) Depreciacao e Amortizacao",
+       OUTRAS_OPERACIONAIS:"(-) Outras Operacionais",
+       RESULTADO_OPERACIONAL:"= Resultado Operacional (EBIT)",
+       RECEITAS_FIN:"+ Receitas Financeiras",
+       DESPESAS_FIN:"(-) Despesas Financeiras",
+       RESULTADO_FINANCEIRO:"= Resultado Financeiro",
+       RESULTADO_ANTES_IR:"= Resultado Antes do IR/CSLL",
+       IR_CSLL:"(-) IR/CSLL",
+       LUCRO_LIQUIDO:"= Lucro Liquido",
+     };
+
+     const DEFAULT_CATEGORIES=[
+       {id:"cat_rec_vendas",nome:"Receitas de Vendas",dreLine:"RECEITA_BRUTA",tipo:"entrada"},
+       {id:"cat_deduc_impostos",nome:"Impostos sobre Vendas",dreLine:"DEDUCOES_VENDAS",tipo:"saida"},
+       {id:"cat_cpv",nome:"CMV/CPV",dreLine:"CPV_CSP",tipo:"saida"},
+       {id:"cat_vendas",nome:"Despesas com Vendas",dreLine:"DESPESAS_VENDAS",tipo:"saida"},
+       {id:"cat_admin",nome:"Despesas Administrativas",dreLine:"DESPESAS_ADMIN",tipo:"saida"},
+       {id:"cat_deprec",nome:"Depreciacao",dreLine:"DEPRECIACAO_AMORTIZACAO",tipo:"saida"},
+       {id:"cat_outros_op",nome:"Outras Operacionais",dreLine:"OUTRAS_OPERACIONAIS",tipo:"saida"},
+       {id:"cat_rec_fin",nome:"Receitas Financeiras",dreLine:"RECEITAS_FIN",tipo:"entrada"},
+       {id:"cat_desp_fin",nome:"Despesas Financeiras",dreLine:"DESPESAS_FIN",tipo:"saida"},
+       {id:"cat_ir_csll",nome:"IR/CSLL",dreLine:"IR_CSLL",tipo:"saida"},
+     ];
+
+     function aggregateByMonth(txs,getDate=(t)=>t.data){
+       const map=new Map();
+       for(const t of txs){
+         const baseDate=getDate(t)||t.data; if(!baseDate) continue;
+         const mk=monthKey(baseDate);
+         if(!map.has(mk)) map.set(mk,{mes:mk,receitas:0,despesas:0,resultado:0,despesasPorCategoria:{}});
+         const acc=map.get(mk); const v=parseNumberBR(t.valor);
+         if(t.tipo==="entrada") acc.receitas+=v; else acc.despesas+=v;
+         if(t.tipo==="saida") acc.despesasPorCategoria[t.categoriaId]=(acc.despesasPorCategoria[t.categoriaId]||0)+v;
+         acc.resultado=acc.receitas-acc.despesas;
+       }
+       return Array.from(map.values()).sort((a,b)=>a.mes.localeCompare(b.mes));
+     }
+
+     function computeDre(txs,categories){
+       const getCat=(id)=>categories.find(c=>c.id===id)||DEFAULT_CATEGORIES.find(c=>c.id===id);
+       const base=Object.fromEntries(Object.keys(DRE_LABELS).map(k=>[k,0]));
+       const negKeys=new Set(["DEDUCOES_VENDAS","CPV_CSP","DESPESAS_VENDAS","DESPESAS_ADMIN","DEPRECIACAO_AMORTIZACAO","OUTRAS_OPERACIONAIS","DESPESAS_FIN","IR_CSLL"]);
+       const posKeys=new Set(["RECEITA_BRUTA","RECEITAS_FIN"]);
+       for(const t of txs){
+         const cat=getCat(t.categoriaId); if(!cat) continue;
+         const v=parseNumberBR(t.valor); const line=cat.dreLine;
+         if(posKeys.has(line)) base[line]+=v; else if(negKeys.has(line)) base[line]+=v;
+       }
+       base.RECEITA_LIQUIDA=base.RECEITA_BRUTA-base.DEDUCOES_VENDAS;
+       base.LUCRO_BRUTO=base.RECEITA_LIQUIDA-base.CPV_CSP;
+       base.RESULTADO_OPERACIONAL=base.LUCRO_BRUTO-base.DESPESAS_VENDAS-base.DESPESAS_ADMIN-base.DEPRECIACAO_AMORTIZACAO-base.OUTRAS_OPERACIONAIS;
+       base.RESULTADO_FINANCEIRO=base.RECEITAS_FIN-base.DESPESAS_FIN;
+       base.RESULTADO_ANTES_IR=base.RESULTADO_OPERACIONAL+base.RESULTADO_FINANCEIRO;
+       base.LUCRO_LIQUIDO=base.RESULTADO_ANTES_IR-base.IR_CSLL;
+       return base;
+     }
+
+     const categoryName=(id,cats)=>(cats.find(x=>x.id===id)||DEFAULT_CATEGORIES.find(x=>x.id===id))?.nome||"—";
+     const centerName=(id,centers)=>centers.find(x=>x?.id===id)?.nome||"—";
+     const methodName=(id,methods)=>methods.find(x=>x?.id===id)?.nome||"—";
+
+     function formatSignedHTML(v,key){
+       const forceNeg=["DEDUCOES_VENDAS","CPV_CSP","DESPESAS_VENDAS","DESPESAS_ADMIN","DEPRECIACAO_AMORTIZACAO","OUTRAS_OPERACIONAIS","DESPESAS_FIN","IR_CSLL"].includes(key);
+       const isNeg=v<0; const abs=BRL.format(Math.abs(v));
+       if(forceNeg||isNeg) return `<span class="text-red-600">- ${abs}</span>`;
+       return `<span class="text-emerald-700">${abs}</span>`;
+     }
+
+     /* ===================== Estado ===================== */
+     let active="graf";
+     let settings={usarCompetencia:false,habilitarCentroCusto:true,habilitarMetodoPagamento:true,habilitarTags:true,habilitarObservacoes:true,habilitarParcelamento:true};
+     let categories=[...DEFAULT_CATEGORIES];
+     let paymentMethods=[]; let costCenters=[]; let transactions=[];
+     let filterYear=new Date().getFullYear();
+     let sidebarOpen=false;
+
+     // Minha Conta
+     let account={
+       profile:{nome:"Usuário Demo",email:"demo@empresa.com",photoUrl:""},
+       company:{razao:"Empresa Demo LTDA",cnpj:"00.000.000/0000-00",endereco:"Rua Exemplo, 123 - São Paulo/SP"},
+       subscription:{plan:"Pro",cycle:"Mensal",cardLast4:"4242",status:"Ativa"},
+       invoices:[
+         {id:uid("inv"),ref:"2025-09",valor:19990,paid:true,link:"#"},
+         {id:uid("inv"),ref:"2025-08",valor:19990,paid:true,link:"#"}
+       ],
+       security:{twoFA:false,sessions:[{id:uid("sess"),device:"Chrome • Windows",last:"hoje"}],apiKeys:[]},
+       preferences:{language:"pt-BR",timezone:"America/Sao_Paulo",emails:{product:true,billing:true,marketing:false}}
+     };
+
+     /* ===================== Derivados ===================== */
+     const getDate=(t)=>settings.usarCompetencia&&t.competenciaData?t.competenciaData:t.data;
+     function derived(){
+       const filteredTx=transactions.filter(t=>{const d=new Date(getDate(t));return !isNaN(d)&&d.getFullYear()===filterYear;});
+       const monthAgg=aggregateByMonth(filteredTx,getDate);
+       const dreAgg=computeDre(filteredTx,categories);
+       return {filteredTx,monthAgg,dreAgg};
+     }
+     function yearOptionsHTML(){
+       const y=new Date().getFullYear(); const years=[y-1,y,y+1];
+       return years.map(yy=>`<option value="${yy}" ${yy===filterYear?"selected":""}>${yy}</option>`).join("");
+     }
+     const switchHTML=(id,value)=>`<div id="${id}" class="switch" tabindex="0" role="switch" aria-checked="${!!value}" data-on="${!!value}"><div class="knob"></div></div>`;
+
+     /* ===================== Seções (Lancamentos) ===================== */
+     function sectionLancamentos({filteredTx}){
+       const metodosAtivos=paymentMethods.filter(m=>m.ativo);
+       const centrosAtivos=costCenters.filter(c=>c.ativo);
+       return `
+       <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+         <form id="formLanc" class="card p-5">
+           <div class="flex items-center justify-between mb-4">
+             <h3 class="text-lg font-semibold">Novo lancamento</h3>
+             <div class="flex items-center gap-3">
+               <label class="text-sm">Entrada</label>${switchHTML("swTipo",true)}<label class="text-sm">Saida</label>
+             </div>
+           </div>
+           <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+             <div><label class="text-xs text-gray-600">Data</label><input id="f_data" type="date" class="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/10" value="${new Date().toISOString().slice(0,10)}"/></div>
+             <div><label class="text-xs text-gray-600">Valor (R$)</label><input id="f_valor" type="text" placeholder="0,00" class="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/10"/></div>
+             ${settings.usarCompetencia?`<div class="sm:col-span-2"><label class="text-xs text-gray-600">Competencia</label><input id="f_comp" type="date" class="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/10" value="${new Date().toISOString().slice(0,10)}"/></div>`:""}
+             <div class="sm:col-span-2"><label class="text-xs text-gray-600">Titulo</label><input id="f_titulo" placeholder="Ex.: Venda A / Aluguel" class="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/10"/></div>
+             <div class="sm:col-span-2"><label class="text-xs text-gray-600">Categoria</label>
+               <select id="f_cat" class="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/10">
+                 ${categories.map(c=>`<option value="${c.id}">${c.nome}</option>`).join("")}
+               </select>
+             </div>
+             ${settings.habilitarMetodoPagamento?`
+             <div class="sm:col-span-2"><label class="text-xs text-gray-600">Metodo de pagamento</label>
+               ${metodosAtivos.length?`
+               <select id="f_met" class="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/10">
+                 <option value="">Selecione...</option>
+                 ${metodosAtivos.map(m=>`<option value="${m.id}">${m.nome}</option>`).join("")}
+               </select>`:`<div class="text-xs text-gray-500">Nenhum metodo ativo.</div>`}
+             </div>`:""}
+             ${settings.habilitarCentroCusto?`
+             <div class="sm:col-span-2"><label class="text-xs text-gray-600">Centro de custo</label>
+               ${centrosAtivos.length?`
+               <select id="f_cc" class="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/10">
+                 <option value="">Selecione...</option>
+                 ${centrosAtivos.map(c=>`<option value="${c.id}">${c.nome}</option>`).join("")}
+               </select>`:`<div class="text-xs text-gray-500">Nenhum centro ativo.</div>`}
+             </div>`:""}
+             ${settings.habilitarTags?`<div class="sm:col-span-2"><label class="text-xs text-gray-600">Tags</label><input id="f_tags" placeholder="separe por virgula" class="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/10"/></div>`:""}
+             ${settings.habilitarObservacoes?`<div class="sm:col-span-2"><label class="text-xs text-gray-600">Observacoes</label><input id="f_obs" placeholder="opcional" class="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/10"/></div>`:""}
+             ${settings.habilitarParcelamento?`
+             <div class="sm:col-span-2 border-t pt-3 mt-1">
+               <div class="flex items-center justify-between"><label class="text-sm font-medium">Parcelado?</label>${switchHTML("swParcel",false)}</div>
+               <div id="parcelFields" class="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-2 hidden">
+                 <div><label class="text-xs text-gray-600">Parcelas</label><input id="f_parc_qtd" type="number" min="1" value="1" class="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/10"/></div>
+                 <div class="sm:col-span-2"><label class="text-xs text-gray-600">Periodicidade</label>
+                   <select id="f_parc_period" class="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/10">
+                     <option value="mensal">Mensal</option><option value="semanal">Semanal</option>
+                   </select>
+                 </div>
+               </div>
+             </div>`:""}
+           </div>
+           <button type="submit" class="inline-flex items-center gap-2 rounded-2xl px-4 py-2 text-sm font-medium border shadow-sm hover:shadow transition mt-4 bg-black text-white">
+             <i data-lucide="plus" class="w-4 h-4"></i> Adicionar
+           </button>
+         </form>
+
+         <div class="card p-5 lg:col-span-2">
+           <div class="flex items-center justify-between mb-3"><h3 class="text-lg font-semibold">Lancamentos (${filteredTx.length})</h3></div>
+           <div class="overflow-x-auto -mx-3 sm:mx-0">
+             <table class="min-w-full text-sm">
+               <thead>
+                 <tr class="text-left text-gray-600">
+                   <th class="py-2 px-3">Data</th><th class="px-3">Titulo</th><th class="px-3">Categoria</th>
+                   <th class="px-3">Centro</th><th class="px-3">Pagamento</th><th class="text-right pr-4">Valor</th><th class="px-3">Tipo</th>
+                 </tr>
+               </thead>
+               <tbody>
+                 ${filteredTx.slice().sort((a,b)=>a.data.localeCompare(b.data)).map(t=>{
+                   const val=BRL.format(parseNumberBR(t.valor));
+                   const valHTML=t.tipo==="saida"?`<span class="text-red-600">- ${val}</span>`:`<span class="text-emerald-600">${val}</span>`;
+                   return `
+                     <tr class="border-t">
+                       <td class="py-2 px-3">${new Date(t.data).toLocaleDateString("pt-BR")}${t.competenciaData?`<div class="text-[11px] text-gray-500">comp: ${new Date(t.competenciaData).toLocaleDateString("pt-BR")}</div>`:""}</td>
+                       <td class="px-3">${t.titulo}</td>
+                       <td class="px-3">${categoryName(t.categoriaId,categories)}</td>
+                       <td class="px-3">${centerName(t.centroCustoId,costCenters)}</td>
+                       <td class="px-3">${methodName(t.metodoPagamentoId,paymentMethods)}</td>
+                       <td class="text-right pr-4">${valHTML}</td>
+                       <td class="px-3"><span class="px-2 py-1 rounded-full text-xs ${t.tipo==="entrada"?"bg-emerald-100 text-emerald-800":"bg-red-100 text-red-700"}">${t.tipo}</span></td>
+                     </tr>`;
+                 }).join("")}
+               </tbody>
+             </table>
+           </div>
+         </div>
+       </div>`;
+     }
+
+     /* ===================== STORYTELLING: GRÁFICOS & KPIs ===================== */
+     const infoBadge=(text)=>`
+       <details class="info">
+         <summary><i data-lucide="info" class="w-4 h-4"></i></summary>
+         <div>${text}</div>
+       </details>`;
+
+     function movingAvg(arr,k=3){
+       const out=[]; for(let i=0;i<arr.length;i++){const s=Math.max(0,i-k+1); const slice=arr.slice(s,i+1); const m=slice.reduce((a,b)=>a+Number(b||0),0)/slice.length; out.push(m);} return out;
+     }
+     function txsOfMonth(allTx, mk){ return allTx.filter(t=>monthKey(getDate(t))===mk); }
+     function dreByMonth(monthAgg, allTx){
+       return monthAgg.map(m=>({ mk:m.mes, dre: computeDre(txsOfMonth(allTx, m.mes), categories) }));
+     }
+
+     function sectionGraficos({monthAgg,filteredTx}){
+       const dreYtd=computeDre(filteredTx,categories);
+       const receitaLiquidaYtd=dreYtd.RECEITA_LIQUIDA;
+       const lucroYtd=dreYtd.LUCRO_LIQUIDO;
+       const despYtd=dreYtd.CPV_CSP+dreYtd.DESPESAS_VENDAS+dreYtd.DESPESAS_ADMIN+dreYtd.DEPRECIACAO_AMORTIZACAO+dreYtd.OUTRAS_OPERACIONAIS+dreYtd.DESPESAS_FIN+dreYtd.IR_CSLL;
+       const margemLiqYtd = receitaLiquidaYtd? (lucroYtd/receitaLiquidaYtd) : 0;
+       const despSobreRecYtd = receitaLiquidaYtd? (despYtd/receitaLiquidaYtd) : 0;
+
+       const mapCat=new Map();
+       for(const m of monthAgg){ for(const [catId,v] of Object.entries(m.despesasPorCategoria||{})){ mapCat.set(catId,(mapCat.get(catId)||0)+Number(v||0)); } }
+       const despesasPorCat=Array.from(mapCat.entries())
+         .map(([catId,v])=>({name:categoryName(catId,categories),value:v}))
+         .filter(x=>x.value>0).sort((a,b)=>b.value-a.value);
+
+       return `
+       <div class="space-y-6">
+         <!-- KPI CARDS -->
+         <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+           <div class="card p-4">
+             <div class="text-xs text-gray-600">Receita líquida (YTD) ${infoBadge("Receita após deduções. Métrica-mãe de crescimento.")}</div>
+             <div class="text-2xl font-semibold mt-1">${BRL.format(receitaLiquidaYtd||0)}</div>
+           </div>
+           <div class="card p-4">
+             <div class="text-xs text-gray-600">Lucro líquido (YTD) ${infoBadge("Resultado final após todas as despesas e impostos.")}</div>
+             <div class="text-2xl font-semibold mt-1">${BRL.format(lucroYtd||0)}</div>
+           </div>
+           <div class="card p-4">
+             <div class="text-xs text-gray-600">Margem líquida (YTD) ${infoBadge("Lucro líquido ÷ Receita líquida.")}</div>
+             <div class="text-2xl font-semibold mt-1">${PCT.format(margemLiqYtd||0)}</div>
+           </div>
+           <div class="card p-4">
+             <div class="text-xs text-gray-600">Despesas/Receita (YTD) ${infoBadge("Percentual da receita consumido por despesas.")}</div>
+             <div class="text-2xl font-semibold mt-1">${PCT.format(despSobreRecYtd||0)}</div>
+           </div>
+         </div>
+
+         <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+           <div class="card p-4 md:col-span-2">
+             <div class="flex items-center justify-between">
+               <h3 class="font-semibold">Receitas vs Despesas (mensal) — com média móvel 3M</h3>
+               ${infoBadge("Veja tendência sem ruído. Compare linhas e cruzamentos. A média móvel (3M) suaviza sazonalidade.")}
+             </div>
+             <div class="h-56 md:h-72"><canvas id="ch_trend"></canvas></div>
+           </div>
+
+           <div class="card p-4">
+             <div class="flex items-center justify-between">
+               <h3 class="font-semibold">Margens (%) por mês</h3>
+               ${infoBadge("Bruta avalia precificação/custos; Operacional mede eficiência; Líquida mostra o que sobra.")}
+             </div>
+             <div class="h-56 md:h-72"><canvas id="ch_margins"></canvas></div>
+           </div>
+
+           <div class="card p-4">
+             <div class="flex items-center justify-between">
+               <h3 class="font-semibold">Pareto de despesas por categoria</h3>
+               ${infoBadge("Barras=valor; linha=acumulado %. Foque nas categorias que somam ~80% do total.")}
+             </div>
+             <div class="h-56 md:h-72"><canvas id="ch_pareto"></canvas></div>
+           </div>
+
+           <div class="card p-4 md:col-span-2">
+             <div class="flex items-center justify-between">
+               <h3 class="font-semibold">Ponte (Waterfall) do Resultado — Ano</h3>
+               ${infoBadge("Jornada do valor: Receita Bruta → Lucro Líquido. Mostra onde se ganha/perde resultado.")}
+             </div>
+             <div class="h-56 md:h-72"><canvas id="ch_waterfall"></canvas></div>
+           </div>
+         </div>
+       </div>`;
+     }
+
+     function sectionDRE({dreAgg}){
+       const order=Object.keys(DRE_LABELS);
+       return `
+       <div class="card p-5">
+         <div class="flex items-center justify-between mb-4">
+           <h3 class="text-lg font-semibold">DRE - Periodo selecionado</h3>
+           <div class="text-sm text-gray-600">Base: lancamentos do ano</div>
+         </div>
+         <div class="overflow-x-auto -mx-3 sm:mx-0">
+           <table class="min-w-full text-sm">
+             <tbody>
+               ${order.map(key=>`
+                 <tr class="border-t">
+                   <td class="py-2 px-3 ${DRE_LABELS[key].startsWith("=")?"font-semibold":""}">${DRE_LABELS[key]}</td>
+                   <td class="text-right py-2 pr-4 font-mono">${formatSignedHTML(dreAgg[key],key)}</td>
+                 </tr>`).join("")}
+             </tbody>
+           </table>
+         </div>
+       </div>`;
+     }
+
+     /* === Telas dentro de Configurações (reaproveitadas) === */
+     function sectionCategorias(){return `
+       <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+         <form id="formCat" class="card p-5">
+           <h3 class="text-lg font-semibold mb-3">Nova categoria</h3>
+           <div class="space-y-3">
+             <div><label class="text-xs text-gray-600">Nome</label><input id="cat_nome" class="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/10"/></div>
+             <div><label class="text-xs text-gray-600">Classificacao (DRE)</label>
+               <select id="cat_dre" class="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/10">
+                 ${Object.keys(DRE_LABELS).map(k=>`<option value="${k}">${DRE_LABELS[k].replace(/^(\(|=|\+)\s*/,"")}</option>`).join("")}
+               </select>
+             </div>
+             <div><label class="text-xs text-gray-600">Tipo</label>
+               <select id="cat_tipo" class="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/10">
+                 <option value="entrada">Entrada</option><option value="saida">Saida</option><option value="ambos">Ambos</option>
+               </select>
+             </div>
+           </div>
+           <button type="submit" class="inline-flex items-center gap-2 rounded-2xl px-4 py-2 text-sm font-medium border shadow-sm hover:shadow transition mt-4 bg-black text-white"><i data-lucide="plus" class="w-4 h-4"></i> Adicionar</button>
+         </form>
+         <div class="card p-5 lg:col-span-2">
+           <h3 class="text-lg font-semibold mb-3">Categorias (${categories.length})</h3>
+           <div class="overflow-x-auto -mx-3 sm:mx-0">
+             <table class="min-w-full text-sm">
+               <thead><tr class="text-left text-gray-600"><th class="py-2 px-3">Nome</th><th class="px-3">Tipo</th><th class="px-3">DRE</th><th></th></tr></thead>
+               <tbody>${categories.map(c=>`
+                 <tr class="border-t">
+                   <td class="py-2 px-3">${c.nome}</td><td class="capitalize px-3">${c.tipo}</td><td class="px-3">${c.dreLine}</td>
+                   <td class="text-right pr-3"><button data-act="rm-cat" data-id="${c.id}" class="text-xs inline-flex items-center gap-2 rounded-2xl px-3 py-1 border shadow-sm hover:shadow transition">Remover</button></td>
+                 </tr>`).join("")}
+               </tbody>
+             </table>
+           </div>
+         </div>
+       </div>`;}
+
+     function sectionMethods(){return `
+       <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+         <form id="formMet" class="card p-5">
+           <h3 class="text-lg font-semibold mb-3">Novo metodo</h3>
+           <label class="text-xs text-gray-600">Nome</label>
+           <input id="met_nome" placeholder="Ex.: Pix, Cartao, Boleto" class="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/10"/>
+           <button type="submit" class="inline-flex items-center gap-2 rounded-2xl px-4 py-2 text-sm font-medium border shadow-sm hover:shadow transition mt-4 bg-black text-white"><i data-lucide="plus" class="w-4 h-4"></i> Adicionar</button>
+         </form>
+         <div class="card p-5 lg:col-span-2">
+           <h3 class="text-lg font-semibold mb-3">Metodos (${paymentMethods.length})</h3>
+           <div class="space-y-2">
+             ${paymentMethods.length===0?`<div class="text-sm text-gray-500">Nenhum metodo cadastrado.</div>`:""}
+             ${paymentMethods.map(m=>`
+               <div class="flex flex-col sm:flex-row sm:items-center justify-between border rounded-2xl px-3 py-2">
+                 <div class="flex items-center gap-3 mb-2 sm:mb-0">
+                   <span class="text-sm font-medium">${m.nome}</span>
+                   <span class="text-xs px-2 py-0.5 rounded-full ${m.ativo?"bg-emerald-100 text-emerald-700":"bg-gray-100 text-gray-600"}">${m.ativo?"Ativo":"Inativo"}</span>
+                 </div>
+                 <div class="flex items-center gap-2">
+                   <button data-act="toggle-met" data-id="${m.id}" class="text-xs inline-flex items-center gap-2 rounded-2xl px-3 py-1 border shadow-sm hover:shadow transition">${m.ativo?"Desativar":"Ativar"}</button>
+                   <button data-act="rm-met" data-id="${m.id}" class="text-xs inline-flex items-center gap-2 rounded-2xl px-3 py-1 border shadow-sm hover:shadow transition">Remover</button>
+                 </div>
+               </div>`).join("")}
+           </div>
+         </div>
+       </div>`;}
+
+     function sectionCenters(){return `
+       <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+         <form id="formCC" class="card p-5">
+           <h3 class="text-lg font-semibold mb-3">Novo centro de custo</h3>
+           <label class="text-xs text-gray-600">Nome</label>
+           <input id="cc_nome" placeholder="Ex.: Comercial, Tecnologia" class="w-full rounded-xl border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/10"/>
+           <button type="submit" class="inline-flex items-center gap-2 rounded-2xl px-4 py-2 text-sm font-medium border shadow-sm hover:shadow transition mt-4 bg-black text-white"><i data-lucide="plus" class="w-4 h-4"></i> Adicionar</button>
+         </form>
+         <div class="card p-5 lg:col-span-2">
+           <h3 class="text-lg font-semibold mb-3">Centros (${costCenters.length})</h3>
+           <div class="space-y-2">
+             ${costCenters.length===0?`<div class="text-sm text-gray-500">Nenhum centro cadastrado.</div>`:""}
+             ${costCenters.map(c=>`
+               <div class="flex flex-col sm:flex-row sm:items-center justify-between border rounded-2xl px-3 py-2">
+                 <div class="flex items-center gap-3 mb-2 sm:mb-0">
+                   <span class="text-sm font-medium">${c.nome}</span>
+                   <span class="text-xs px-2 py-0.5 rounded-full ${c.ativo?"bg-emerald-100 text-emerald-700":"bg-gray-100 text-gray-600"}">${c.ativo?"Ativo":"Inativo"}</span>
+                 </div>
+                 <div class="flex items-center gap-2">
+                   <button data-act="toggle-cc" data-id="${c.id}" class="text-xs inline-flex items-center gap-2 rounded-2xl px-3 py-1 border shadow-sm hover:shadow transition">${c.ativo?"Desativar":"Ativar"}</button>
+                   <button data-act="rm-cc" data-id="${c.id}" class="text-xs inline-flex items-center gap-2 rounded-2xl px-3 py-1 border shadow-sm hover:shadow transition">Remover</button>
+                 </div>
+               </div>`).join("")}
+           </div>
+         </div>
+       </div>`;}
+
+     function sectionSettings(){
+       const row=(title,desc,key)=>`
+         <div class="flex items-center justify-between">
+           <div><div class="text-sm font-medium">${title}</div><div class="text-xs text-gray-600">${desc}</div></div>
+           ${switchHTML(`sw_${key}`,settings[key])}
+         </div>`;
+       return `
+       <div class="space-y-6">
+         <div class="card p-5 max-w-xl">
+           <h3 class="text-lg font-semibold mb-3">Configuracoes</h3>
+           <div class="space-y-4">
+             ${row("Competencia (usar competencia)","Quando ativo, os graficos/ano usam a data de competencia.","usarCompetencia")}
+             ${row("Habilitar Centros de Custo","Exibe o seletor no formulario de lancamentos.","habilitarCentroCusto")}
+             ${row("Habilitar Metodos de Pagamento","Exibe o seletor no formulario de lancamentos.","habilitarMetodoPagamento")}
+             ${row("Habilitar Tags","Permite inserir tags no lancamento.","habilitarTags")}
+             ${row("Habilitar Observacoes","Campo livre no lancamento.","habilitarObservacoes")}
+             ${row("Habilitar Parcelamento","Cria multiplos lancamentos conforme parcelas.","habilitarParcelamento")}
+           </div>
+         </div>
+
+         <details class="card p-5" open>
+           <summary class="cursor-pointer text-lg font-semibold">Categorias</summary>
+           <div class="mt-4">${sectionCategorias()}</div>
+         </details>
+
+         <details class="card p-5">
+           <summary class="cursor-pointer text-lg font-semibold">Metodos de Pagamento</summary>
+           <div class="mt-4">${sectionMethods()}</div>
+         </details>
+
+         <details class="card p-5">
+           <summary class="cursor-pointer text-lg font-semibold">Centros de Custo</summary>
+           <div class="mt-4">${sectionCenters()}</div>
+         </details>
+       </div>`;
+     }
+
+     /* ===================== Minha Conta (SaaS best-practices) ===================== */
+     function sectionMinhaConta(){
+       const invRows=account.invoices.map(i=>`
+         <tr class="border-t">
+           <td class="py-2 px-3">${i.ref}</td>
+           <td class="px-3">${BRL.format(i.valor/100)}</td>
+           <td class="px-3">${i.paid?'<span class="text-emerald-700 text-xs px-2 py-0.5 bg-emerald-100 rounded-full">Paga</span>':'<span class="text-red-700 text-xs px-2 py-0.5 bg-red-100 rounded-full">Pendente</span>'}</td>
+           <td class="text-right pr-3"><a href="${i.link}" class="text-xs underline">Baixar</a></td>
+         </tr>`).join("");
+
+       const keyList=account.security.apiKeys.map(k=>`
+         <div class="flex items-center justify-between border rounded-2xl px-3 py-2">
+           <code class="text-xs">${k.mask}</code>
+           <button data-act="revoke-key" data-id="${k.id}" class="text-xs rounded-2xl px-3 py-1 border">Revogar</button>
+         </div>`).join("");
+
+       return `
+       <div class="grid grid-cols-1 xl:grid-cols-2 gap-6">
+         <div class="card p-5">
+           <h3 class="text-lg font-semibold mb-3">Perfil</h3>
+           <form id="formPerfil" class="grid grid-cols-1 md:grid-cols-2 gap-3">
+             <div class="md:col-span-2"><label class="text-xs text-gray-600">Nome</label><input id="acc_nome" value="${account.profile.nome}" class="w-full rounded-xl border px-3 py-2 text-sm"/></div>
+             <div class="md:col-span-2"><label class="text-xs text-gray-600">E-mail</label><input id="acc_email" type="email" value="${account.profile.email}" class="w-full rounded-xl border px-3 py-2 text-sm"/></div>
+             <div class="md:col-span-2"><label class="text-xs text-gray-600">Foto (URL)</label><input id="acc_photo" value="${account.profile.photoUrl||''}" class="w-full rounded-xl border px-3 py-2 text-sm"/></div>
+             <div class="md:col-span-2"><button class="rounded-2xl px-4 py-2 text-sm border shadow-sm bg-black text-white">Salvar</button></div>
+           </form>
+         </div>
+
+         <div class="card p-5">
+           <h3 class="text-lg font-semibold mb-3">Empresa</h3>
+           <form id="formEmpresa" class="grid grid-cols-1 md:grid-cols-2 gap-3">
+             <div class="md:col-span-2"><label class="text-xs text-gray-600">Razao social</label><input id="acc_razao" value="${account.company.razao}" class="w-full rounded-xl border px-3 py-2 text-sm"/></div>
+             <div><label class="text-xs text-gray-600">CNPJ</label><input id="acc_cnpj" value="${account.company.cnpj}" class="w-full rounded-xl border px-3 py-2 text-sm"/></div>
+             <div class="md:col-span-2"><label class="text-xs text-gray-600">Endereco</label><input id="acc_end" value="${account.company.endereco}" class="w-full rounded-xl border px-3 py-2 text-sm"/></div>
+             <div class="md:col-span-2"><button class="rounded-2xl px-4 py-2 text-sm border shadow-sm bg-black text-white">Salvar</button></div>
+           </form>
+         </div>
+
+         <div class="card p-5">
+           <div class="flex items-center justify-between mb-3">
+             <h3 class="text-lg font-semibold">Assinatura & Faturamento</h3>
+             <span class="text-xs px-2 py-0.5 rounded-full ${account.subscription.status==='Ativa'?'bg-emerald-100 text-emerald-700':'bg-gray-100 text-gray-600'}">${account.subscription.status}</span>
+           </div>
+           <form id="formPlano" class="grid grid-cols-1 md:grid-cols-2 gap-3">
+             <div><label class="text-xs text-gray-600">Plano</label>
+               <select id="acc_plan" class="w-full rounded-xl border px-3 py-2 text-sm">
+                 <option ${account.subscription.plan==='Starter'?'selected':''}>Starter</option>
+                 <option ${account.subscription.plan==='Pro'?'selected':''}>Pro</option>
+                 <option ${account.subscription.plan==='Enterprise'?'selected':''}>Enterprise</option>
+               </select>
+             </div>
+             <div><label class="text-xs text-gray-600">Ciclo</label>
+               <select id="acc_cycle" class="w-full rounded-xl border px-3 py-2 text-sm">
+                 <option ${account.subscription.cycle==='Mensal'?'selected':''}>Mensal</option>
+                 <option ${account.subscription.cycle==='Anual'?'selected':''}>Anual</option>
+               </select>
+             </div>
+             <div class="md:col-span-2"><label class="text-xs text-gray-600">Metodo de pagamento</label>
+               <div class="flex items-center justify-between border rounded-2xl px-3 py-2">
+                 <div class="text-sm">Cartao final •••• ${account.subscription.cardLast4}</div>
+                 <button id="btnUpdCard" class="text-xs rounded-2xl px-3 py-1 border">Atualizar Cartao</button>
+               </div>
+             </div>
+             <div class="md:col-span-2"><button class="rounded-2xl px-4 py-2 text-sm border shadow-sm bg-black text-white">Salvar</button></div>
+           </form>
+           <div class="mt-4">
+             <h4 class="font-medium mb-2">Faturas</h4>
+             <div class="overflow-x-auto -mx-3 sm:mx-0">
+               <table class="min-w-full text-sm">
+                 <thead><tr class="text-left text-gray-600"><th class="py-2 px-3">Referencia</th><th class="px-3">Valor</th><th class="px-3">Status</th><th></th></tr></thead>
+                 <tbody>${invRows}</tbody>
+               </table>
+             </div>
+           </div>
+         </div>
+
+         <div class="card p-5">
+           <h3 class="text-lg font-semibold mb-3">Seguranca</h3>
+           <form id="formSenha" class="grid grid-cols-1 md:grid-cols-2 gap-3">
+             <div><label class="text-xs text-gray-600">Senha atual</label><input id="acc_pass_old" type="password" class="w-full rounded-xl border px-3 py-2 text-sm"/></div>
+             <div><label class="text-xs text-gray-600">Nova senha</label><input id="acc_pass_new" type="password" class="w-full rounded-xl border px-3 py-2 text-sm"/></div>
+             <div class="md:col-span-2 flex items-center justify-between mt-1">
+               <div class="text-sm">Autenticacao em 2 fatores</div>${switchHTML("sw2fa",account.security.twoFA)}
+             </div>
+             <div class="md:col-span-2"><button class="rounded-2xl px-4 py-2 text-sm border shadow-sm bg-black text-white">Atualizar</button></div>
+           </form>
+           <div class="mt-4">
+             <h4 class="font-medium mb-2">Sessoes ativas</h4>
+             <div class="space-y-2">
+               ${account.security.sessions.map(s=>`
+                 <div class="flex items-center justify-between border rounded-2xl px-3 py-2">
+                   <div class="text-sm">${s.device} • ${s.last}</div>
+                   <button data-act="end-session" data-id="${s.id}" class="text-xs rounded-2xl px-3 py-1 border">Encerrar</button>
+                 </div>`).join("")}
+             </div>
+           </div>
+         </div>
+
+         <div class="card p-5">
+           <h3 class="text-lg font-semibold mb-3">API Keys</h3>
+           <div class="space-y-2">${(account.security.apiKeys.map(k=>`
+             <div class="flex items-center justify-between border rounded-2xl px-3 py-2">
+               <code class="text-xs">${k.mask}</code>
+               <button data-act="revoke-key" data-id="${k.id}" class="text-xs rounded-2xl px-3 py-1 border">Revogar</button>
+             </div>`).join("")) || '<div class="text-sm text-gray-500">Nenhuma chave.</div>'}</div>
+           <button id="btnGenKey" class="mt-3 text-xs rounded-2xl px-3 py-1 border">Gerar nova chave</button>
+         </div>
+
+         <div class="card p-5">
+           <h3 class="text-lg font-semibold mb-3">Preferencias</h3>
+           <form id="formPrefs" class="grid grid-cols-1 md:grid-cols-2 gap-3">
+             <div><label class="text-xs text-gray-600">Idioma</label>
+               <select id="pref_lang" class="w-full rounded-xl border px-3 py-2 text-sm">
+                 <option value="pt-BR" ${account.preferences.language==='pt-BR'?'selected':''}>Português (Brasil)</option>
+                 <option value="en-US" ${account.preferences.language==='en-US'?'selected':''}>English (US)</option>
+               </select>
+             </div>
+             <div><label class="text-xs text-gray-600">Fuso horario</label>
+               <input id="pref_tz" value="${account.preferences.timezone}" class="w-full rounded-xl border px-3 py-2 text-sm"/>
+             </div>
+             <div class="md:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-2">
+               <label class="flex items-center gap-2 text-sm">${switchHTML("sw_email_prod",account.preferences.emails.product)} <span>Emails de produto</span></label>
+               <label class="flex items-center gap-2 text-sm">${switchHTML("sw_email_bill",account.preferences.emails.billing)} <span>Emails de cobranca</span></label>
+               <label class="flex items-center gap-2 text-sm">${switchHTML("sw_email_mkt",account.preferences.emails.marketing)} <span>Marketing</span></label>
+             </div>
+             <div class="md:col-span-2"><button class="rounded-2xl px-4 py-2 text-sm border shadow-sm bg-black text-white">Salvar</button></div>
+           </form>
+         </div>
+
+         <div class="card p-5">
+           <h3 class="text-lg font-semibold mb-3">Dados & Privacidade</h3>
+           <div class="flex flex-wrap gap-2">
+             <button id="btnExport" class="rounded-2xl px-4 py-2 text-sm border shadow-sm">Exportar dados (JSON)</button>
+             <button id="btnAnon" class="rounded-2xl px-4 py-2 text-sm border shadow-sm">Solicitar anonimização</button>
+           </div>
+         </div>
+
+         <div class="card p-5">
+           <h3 class="text-lg font-semibold mb-3 text-red-700">Zona de Perigo</h3>
+           <button id="btnDeleteAcc" class="rounded-2xl px-4 py-2 text-sm border shadow-sm bg-red-600 text-white">Encerrar conta</button>
+         </div>
+       </div>`;
+     }
+
+     /* ===================== Layout Principal ===================== */
+     function sidebarItem(key,label,icon){
+       const isActive=active===key?"bg-gray-100 font-semibold":"";
+       return `<button data-nav="${key}" class="flex items-center gap-3 w-full text-left px-4 py-3 rounded-xl hover:bg-gray-100 transition ${isActive}">
+         <i data-lucide="${icon}" class="h-5 w-5"></i><span>${label}</span></button>`;
+     }
+
+     function render(){
+       const {filteredTx,monthAgg,dreAgg}=derived();
+       const content= active==="lanc"?sectionLancamentos({filteredTx})
+         : active==="graf"?sectionGraficos({monthAgg,filteredTx})
+         : active==="dre"?sectionDRE({dreAgg})
+         : active==="conf"?sectionSettings()
+         : sectionMinhaConta();
+
+       document.getElementById("app").innerHTML=`
+         <div class="flex">
+           <aside class="fixed z-30 inset-y-0 left-0 w-72 p-4 bg-white border-r transform transition-transform duration-200 ${sidebarOpen?"translate-x-0":"-translate-x-full"} md:translate-x-0 md:static md:block">
+             <div class="flex items-center justify-between mb-6">
+               <div class="flex items-center gap-2">
+                 <i data-lucide="list-todo" class="h-6 w-6"></i><h1 class="text-lg font-bold">DRE Software</h1>
+               </div>
+               <button id="btnCloseSidebar" class="md:hidden rounded-xl border px-2 py-1"><i data-lucide="x"></i></button>
+             </div>
+             <nav class="space-y-1">
+               ${sidebarItem("lanc","Lancamentos","table")}
+               ${sidebarItem("graf","Graficos","pie-chart")}
+               ${sidebarItem("dre","DRE","folder-tree")}
+               ${sidebarItem("conf","Configuracoes","settings")}
+               ${sidebarItem("acc","Minha Conta","user-circle")}
+             </nav>
+           </aside>
+
+           <main class="flex-1 md:ml-0 ml-0 w-full">
+             <header class="sticky top-0 z-20 bg-gray-50/80 backdrop-blur border-b">
+               <div class="flex items-center justify-between px-4 py-3">
+                 <div class="flex items-center gap-2">
+                   <button id="btnOpenSidebar" class="md:hidden rounded-xl border px-3 py-2"><i data-lucide="menu"></i></button>
+                   <span class="hidden md:inline text-sm text-gray-600">Bem-vindo</span>
+                 </div>
+                 <select id="selYear" class="w-32 rounded-xl border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-black/10">${yearOptionsHTML()}</select>
+               </div>
+             </header>
+
+             <section class="p-4 md:p-8">${content}</section>
+           </main>
+         </div>`;
+
+       lucide.createIcons();
+
+       document.querySelectorAll("[data-nav]").forEach(el=>el.addEventListener("click",()=>{active=el.getAttribute("data-nav"); sidebarOpen=false; render();}));
+       const selYear=document.getElementById("selYear"); selYear?.addEventListener("change",(e)=>{filterYear=Number(e.target.value); render();});
+       document.getElementById("btnOpenSidebar")?.addEventListener("click",()=>{sidebarOpen=true; render();});
+       document.getElementById("btnCloseSidebar")?.addEventListener("click",()=>{sidebarOpen=false; render();});
+
+       if(active==="lanc") bindLancamentos();
+       if(active==="graf") drawCharts();
+       if(active==="conf"){ bindSettings(); bindCategorias(); bindMetodos(); bindCentros(); }
+       if(active==="acc"){ bindMinhaConta(); }
+     }
+
+     /* ===================== Eventos & Lógica ===================== */
+     function bindLancamentos(){
+       const swTipo=document.getElementById("swTipo");
+       const swParcel=document.getElementById("swParcel");
+       const parcelFields=document.getElementById("parcelFields");
+       const form=document.getElementById("formLanc");
+       swTipo?.addEventListener("click",()=>{const on=swTipo.getAttribute("data-on")!=="true"; swTipo.setAttribute("data-on",String(on));});
+       swParcel?.addEventListener("click",()=>{const on=swParcel.getAttribute("data-on")!=="true"; swParcel.setAttribute("data-on",String(on)); parcelFields?.classList.toggle("hidden",!on);});
+       if(!form) return;
+       form.addEventListener("submit",(e)=>{
+         e.preventDefault();
+         const tipo=(document.getElementById("swTipo").getAttribute("data-on")==="true")?"entrada":"saida";
+         const data=document.getElementById("f_data").value;
+         const valor=parseNumberBR(document.getElementById("f_valor").value);
+         const competenciaData=settings.usarCompetencia?(document.getElementById("f_comp")?.value||""):"";
+         const titulo=document.getElementById("f_titulo").value.trim();
+         const categoriaId=document.getElementById("f_cat").value;
+         const metodoPagamentoId=settings.habilitarMetodoPagamento?(document.getElementById("f_met")?.value||""):"";
+         const centroCustoId=settings.habilitarCentroCusto?(document.getElementById("f_cc")?.value||""):"";
+         const tagsStr=settings.habilitarTags?(document.getElementById("f_tags")?.value||""):"";
+         const observacoes=settings.habilitarObservacoes?(document.getElementById("f_obs")?.value||""):"";
+         if(!titulo||!categoriaId||valor<=0||!data) return;
+
+         const baseTx={id:uid("t"),tipo,titulo,categoriaId,valor,metodoPagamentoId:settings.habilitarMetodoPagamento&&metodoPagamentoId?metodoPagamentoId:undefined,centroCustoId:settings.habilitarCentroCusto&&centroCustoId?centroCustoId:undefined,tags:settings.habilitarTags&&tagsStr?tagsStr.split(",").map(t=>t.trim()).filter(Boolean):undefined,observacoes:settings.habilitarObservacoes&&observacoes?observacoes:undefined};
+
+         const parcelado=settings.habilitarParcelamento&&(document.getElementById("swParcel")?.getAttribute("data-on")==="true");
+         if(parcelado){
+           const parcelas=Math.max(1,Number(document.getElementById("f_parc_qtd").value||1));
+           const periodicidade=document.getElementById("f_parc_period").value;
+           const total=valor; const each=Math.round((total/parcelas)*100)/100; const planId=uid("parcel");
+           const novos=[];
+           for(let i=0;i<parcelas;i++){
+             const d=new Date(data);
+             if(periodicidade==="mensal") d.setMonth(d.getMonth()+i);
+             if(periodicidade==="semanal") d.setDate(d.getDate()+i*7);
+             const comp=competenciaData?new Date(competenciaData):null;
+             if(comp){ if(periodicidade==="mensal") comp.setMonth(comp.getMonth()+i); if(periodicidade==="semanal") comp.setDate(comp.getDate()+i*7); }
+             novos.push({...baseTx,id:uid("t"),data:d.toISOString().slice(0,10),competenciaData:settings.usarCompetencia&&comp?comp.toISOString().slice(0,10):undefined,titulo:`${titulo} (parcela ${i+1}/${parcelas})`,planoParcelamentoId:planId,parcelaNumero:i+1,parcelasTotal:parcelas,valor:each});
+           }
+           transactions=[...novos,...transactions];
+         }else{
+           transactions=[{...baseTx,data,competenciaData:settings.usarCompetencia&&competenciaData?competenciaData:undefined},...transactions];
+         }
+         render();
+       });
+     }
+
+     function bindCategorias(){
+       const form=document.getElementById("formCat");
+       form?.addEventListener("submit",(e)=>{e.preventDefault(); const nome=document.getElementById("cat_nome").value.trim(); const dreLine=document.getElementById("cat_dre").value; const tipo=document.getElementById("cat_tipo").value; if(!nome) return; categories.push({id:uid("cat"),nome,dreLine,tipo}); render();});
+       document.querySelectorAll('[data-act="rm-cat"]').forEach(btn=>btn.addEventListener("click",()=>{const id=btn.getAttribute("data-id"); categories=categories.filter(c=>c.id!==id); render();}));
+     }
+
+     function bindMetodos(){
+       const form=document.getElementById("formMet");
+       form?.addEventListener("submit",(e)=>{e.preventDefault(); const nome=document.getElementById("met_nome").value.trim(); if(!nome) return; paymentMethods.push({id:uid("met"),nome,ativo:true}); render();});
+       document.querySelectorAll('[data-act="toggle-met"]').forEach(btn=>btn.addEventListener("click",()=>{const id=btn.getAttribute("data-id"); const m=paymentMethods.find(x=>x.id===id); if(m) m.ativo=!m.ativo; render();}));
+       document.querySelectorAll('[data-act="rm-met"]').forEach(btn=>btn.addEventListener("click",()=>{const id=btn.getAttribute("data-id"); paymentMethods=paymentMethods.filter(m=>m.id!==id); render();}));
+     }
+
+     function bindCentros(){
+       const form=document.getElementById("formCC");
+       form?.addEventListener("submit",(e)=>{e.preventDefault(); const nome=document.getElementById("cc_nome").value.trim(); if(!nome) return; costCenters.push({id:uid("cc"),nome,ativo:true}); render();});
+       document.querySelectorAll('[data-act="toggle-cc"]').forEach(btn=>btn.addEventListener("click",()=>{const id=btn.getAttribute("data-id"); const c=costCenters.find(x=>x.id===id); if(c) c.ativo=!c.ativo; render();}));
+       document.querySelectorAll('[data-act="rm-cc"]').forEach(btn=>btn.addEventListener("click",()=>{const id=btn.getAttribute("data-id"); costCenters=costCenters.filter(c=>c.id!==id); render();}));
+     }
+
+     /* ===== Minha Conta: eventos ===== */
+     function bindMinhaConta(){
+       const bindSwitchSimple=(id,getter)=>{const el=document.getElementById(id); el?.addEventListener("click",()=>{const on=el.getAttribute("data-on")!=="true"; el.setAttribute("data-on",String(on)); getter(on);});};
+
+       document.getElementById("formPerfil")?.addEventListener("submit",(e)=>{e.preventDefault(); account.profile.nome=document.getElementById("acc_nome").value.trim(); account.profile.email=document.getElementById("acc_email").value.trim(); account.profile.photoUrl=document.getElementById("acc_photo").value.trim(); render();});
+       document.getElementById("formEmpresa")?.addEventListener("submit",(e)=>{e.preventDefault(); account.company.razao=document.getElementById("acc_razao").value.trim(); account.company.cnpj=document.getElementById("acc_cnpj").value.trim(); account.company.endereco=document.getElementById("acc_end").value.trim(); render();});
+       document.getElementById("formPlano")?.addEventListener("submit",(e)=>{e.preventDefault(); account.subscription.plan=document.getElementById("acc_plan").value; account.subscription.cycle=document.getElementById("acc_cycle").value; render();});
+       document.getElementById("btnUpdCard")?.addEventListener("click",(e)=>{e.preventDefault(); const n=prompt("Ultimos 4 digitos do novo cartao:","1234"); if(n&&/^\d{4}$/.test(n)) {account.subscription.cardLast4=n; render();}});
+       document.getElementById("formSenha")?.addEventListener("submit",(e)=>{e.preventDefault(); const newp=document.getElementById("acc_pass_new").value; if(newp.length<8){alert("Senha deve ter 8+ caracteres."); return;} alert("Senha atualizada.");});
+       bindSwitchSimple("sw2fa",(on)=>{account.security.twoFA=on;});
+
+       document.querySelectorAll('[data-act="end-session"]').forEach(b=>b.addEventListener("click",()=>{const id=b.getAttribute("data-id"); account.security.sessions=account.security.sessions.filter(s=>s.id!==id); render();}));
+       document.getElementById("btnGenKey")?.addEventListener("click",()=>{const id=uid("key"); const raw=cryptoRandom(24); account.security.apiKeys.push({id,mask:maskKey(raw)}); alert("Chave gerada. Copie agora: "+raw); render();});
+       document.querySelectorAll('[data-act="revoke-key"]').forEach(b=>b.addEventListener("click",()=>{const id=b.getAttribute("data-id"); account.security.apiKeys=account.security.apiKeys.filter(k=>k.id!==id); render();}));
+
+       document.getElementById("formPrefs")?.addEventListener("submit",(e)=>{e.preventDefault(); account.preferences.language=document.getElementById("pref_lang").value; account.preferences.timezone=document.getElementById("pref_tz").value; render();});
+       bindSwitchSimple("sw_email_prod",(on)=>{account.preferences.emails.product=on;});
+       bindSwitchSimple("sw_email_bill",(on)=>{account.preferences.emails.billing=on;});
+       bindSwitchSimple("sw_email_mkt",(on)=>{account.preferences.emails.marketing=on;});
+
+       document.getElementById("btnExport")?.addEventListener("click",()=>{const data={transactions,categories,paymentMethods,costCenters,account,settings}; downloadJSON("export_dre.json",data);});
+       document.getElementById("btnAnon")?.addEventListener("click",()=>{alert("Solicitação registrada. Nossa equipe entrará em contato.");});
+       document.getElementById("btnDeleteAcc")?.addEventListener("click",()=>{if(confirm("Tem certeza? Isso é irreversível.")){alert("Conta encerrada (simulação).");}});
+     }
+
+     function cryptoRandom(len){
+       const bytes=new Uint8Array(len); (window.crypto||window.msCrypto).getRandomValues(bytes);
+       return Array.from(bytes).map(b=>("0"+(b&0xff).toString(16)).slice(-2)).join("");
+     }
+     function maskKey(raw){ return raw.slice(0,6)+"••••••••"+raw.slice(-4); }
+     function downloadJSON(filename,obj){
+       const url=URL.createObjectURL(new Blob([JSON.stringify(obj,null,2)],{type:"application/json"}));
+       const a=document.createElement("a"); a.href=url; a.download=filename; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+     }
+
+     /* ===================== Charts (NOVOS) ===================== */
+     let CHARTS={};
+     function destroyCharts(){for(const k of Object.keys(CHARTS)){try{CHARTS[k]?.destroy();}catch{}} CHARTS={};}
+
+     function buildWaterfall(dre){
+       const steps=[
+         ["Receita Bruta", dre.RECEITA_BRUTA],
+         ["(-) Deduções", -dre.DEDUCOES_VENDAS],
+         ["Receita Líquida", 0],
+         ["(-) CPV/CSP", -dre.CPV_CSP],
+         ["Lucro Bruto", 0],
+         ["(-) Vendas", -dre.DESPESAS_VENDAS],
+         ["(-) Admin", -dre.DESPESAS_ADMIN],
+         ["(-) Deprec.", -dre.DEPRECIACAO_AMORTIZACAO],
+         ["(-) Outras Op.", -dre.OUTRAS_OPERACIONAIS],
+         ["Resultado Oper.", 0],
+         ["+ Receitas Fin.", dre.RECEITAS_FIN],
+         ["(-) Desp. Fin.", -dre.DESPESAS_FIN],
+         ["Resultado Fin.", 0],
+         ["Resultado Antes IR", 0],
+         ["(-) IR/CSLL", -dre.IR_CSLL],
+         ["Lucro Líquido", 0],
+       ];
+       let cum=0; const labels=[], base=[], change=[];
+       for(const [label,val] of steps){
+         labels.push(label);
+         if(label.includes("Receita Líquida")||label.startsWith("Lucro")||label.startsWith("Resultado")){
+           base.push(0); change.push(cum);
+         }else{ base.push(cum); change.push(val); cum+=val; }
+       }
+       return {labels,base,change};
+     }
+
+     function drawCharts(){
+       destroyCharts();
+       const {monthAgg,filteredTx}=derived();
+       const labels=monthAgg.map(m=>m.mes);
+       const receitas=monthAgg.map(m=>m.receitas);
+       const despesas=monthAgg.map(m=>m.despesas);
+       const resultado=monthAgg.map(m=>m.resultado);
+       const receitasMA=movingAvg(receitas,3);
+       const despesasMA=movingAvg(despesas,3);
+
+       const dreMonths=dreByMonth(monthAgg,filteredTx);
+       const margBruta = dreMonths.map(x=> x.dre.RECEITA_LIQUIDA ? x.dre.LUCRO_BRUTO/x.dre.RECEITA_LIQUIDA : 0);
+       const margOper  = dreMonths.map(x=> x.dre.RECEITA_LIQUIDA ? x.dre.RESULTADO_OPERACIONAL/x.dre.RECEITA_LIQUIDA : 0);
+       const margLiq   = dreMonths.map(x=> x.dre.RECEITA_LIQUIDA ? x.dre.LUCRO_LIQUIDO/x.dre.RECEITA_LIQUIDA : 0);
+
+       const mapCat=new Map(); for(const m of monthAgg){for(const [catId,v] of Object.entries(m.despesasPorCategoria||{})){mapCat.set(catId,(mapCat.get(catId)||0)+Number(v||0));}}
+       const dsCat=Array.from(mapCat.entries()).map(([catId,v])=>({name:categoryName(catId,categories),value:v})).filter(x=>x.value>0).sort((a,b)=>b.value-a.value);
+       const paretoLabels=dsCat.map(x=>x.name);
+       const paretoValues=dsCat.map(x=>x.value);
+       const totalDesp=paretoValues.reduce((a,b)=>a+b,0)||1;
+       let running=0; const paretoAccum=paretoValues.map(v=>{running+=v; return running/totalDesp;});
+
+       const dreYtd=computeDre(filteredTx,categories);
+       const wf=buildWaterfall(dreYtd);
+
+       const fmtBRL=(v)=>BRL.format(Number(v||0));
+       const fmtPct=(v)=>PCT.format(Number(v||0));
+       const baseOpts={responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{boxWidth:12}},tooltip:{callbacks:{label:(ctx)=>`${ctx.dataset.label?ctx.dataset.label+": ":""}${ctx.dataset.yAxisID==='yPct'?fmtPct(ctx.parsed.y):fmtBRL(ctx.parsed.y)}`}}},interaction:{mode:"index",intersect:false}};
+
+       const elTrend=document.getElementById("ch_trend");
+       if(elTrend){CHARTS.trend=new Chart(elTrend.getContext("2d"),{
+         type:"line",
+         data:{labels,datasets:[
+           {label:"Receitas",data:receitas},
+           {label:"Despesas",data:despesas},
+           {label:"Resultado",data:resultado},
+           {label:"Receitas (MA3)",data:receitasMA,borderDash:[6,6]},
+           {label:"Despesas (MA3)",data:despesasMA,borderDash:[6,6]},
+         ]},
+         options:{...baseOpts,scales:{y:{ticks:{callback:(v)=>fmtBRL(v)}}}}
+       });}
+
+       const elMargins=document.getElementById("ch_margins");
+       if(elMargins){CHARTS.margins=new Chart(elMargins.getContext("2d"),{
+         type:"line",
+         data:{labels,datasets:[
+           {label:"Bruta %",data:margBruta,yAxisID:"yPct"},
+           {label:"Operacional %",data:margOper,yAxisID:"yPct"},
+           {label:"Líquida %",data:margLiq,yAxisID:"yPct"},
+         ]},
+         options:{...baseOpts,scales:{yPct:{type:"linear",position:"left",ticks:{callback:(v)=>fmtPct(v),max:1}}}}
+       });}
+
+       const elPareto=document.getElementById("ch_pareto");
+       if(elPareto){CHARTS.pareto=new Chart(elPareto.getContext("2d"),{
+         data:{labels:paretoLabels,datasets:[
+           {type:"bar",label:"Despesas",data:paretoValues,yAxisID:"y"},
+           {type:"line",label:"Acumulado %",data:paretoAccum,yAxisID:"yPct"},
+         ]},
+         options:{...baseOpts,scales:{y:{ticks:{callback:(v)=>fmtBRL(v)}},yPct:{type:"linear",position:"right",min:0,max:1,ticks:{callback:(v)=>fmtPct(v)}}}}
+       });}
+
+       const elWf=document.getElementById("ch_waterfall");
+       if(elWf){CHARTS.waterfall=new Chart(elWf.getContext("2d"),{
+         type:"bar",
+         data:{labels:wf.labels,datasets:[
+           {label:"Base",data:wf.base,stack:"wf",borderWidth:0},
+           {label:"Variação",data:wf.change,stack:"wf"},
+         ]},
+         options:{...baseOpts,scales:{y:{ticks:{callback:(v)=>fmtBRL(v)}}},plugins:{legend:{display:false},tooltip:{callbacks:{label:(ctx)=>fmtBRL(ctx.parsed.y)}}}}
+       });}
+
+       const ro=new ResizeObserver(()=>{Object.values(CHARTS).forEach(ch=>ch?.resize());});
+       document.querySelectorAll("canvas").forEach(cv=>ro.observe(cv.parentElement));
+       window.addEventListener("resize",()=>{Object.values(CHARTS).forEach(ch=>ch?.resize());},{passive:true});
+     }
+
+     function bindSettings(){
+       const bindSwitch=(key)=>{const el=document.getElementById(`sw_${key}`); el?.addEventListener("click",()=>{const on=el.getAttribute("data-on")!=="true"; el.setAttribute("data-on",String(on)); settings[key]=on; render();});};
+       ["usarCompetencia","habilitarCentroCusto","habilitarMetodoPagamento","habilitarTags","habilitarObservacoes","habilitarParcelamento"].forEach(bindSwitch);
+     }
+
+     /* ===================== Smoke tests ===================== */
+     (function smoke(){
+       const testTx=[{id:"1",tipo:"entrada",data:"2025-01-10",titulo:"A",categoriaId:"cat_rec_vendas",valor:100},{id:"2",tipo:"saida",data:"2025-01-11",titulo:"B",categoriaId:"cat_admin",valor:40},];
+       const agg=aggregateByMonth(testTx); console.assert(Array.isArray(agg)&&agg.length===1,"aggregateByMonth: month count"); console.assert(Math.abs(agg[0].resultado-60)<1e-6,"aggregateByMonth: resultado = 60");
+       const dre=computeDre(testTx,DEFAULT_CATEGORIES); console.assert(dre.RECEITA_BRUTA===100,"computeDre: Receita Bruta 100"); console.assert(dre.DESPESAS_ADMIN===40,"computeDre: Desp Admin 40");
+     })();
+
+     /* ===================== Start ===================== */
+     render();
+   </script>
+ </body>
+</html>
