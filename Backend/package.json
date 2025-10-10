@@ -1,25 +1,26 @@
 {
-  "name": "financeiro-dre-backend",
+  "name": "dre-mvp-backend",
   "version": "1.0.0",
-  "type": "module",
-  "main": "src/server.js",
+  "private": true,
+  "engines": { "node": "20.x" },
   "scripts": {
-    "dev": "node --watch src/server.js",
+    "dev": "nodemon src/server.js",
     "start": "node src/server.js",
-    "prisma": "prisma",
-    "migrate": "prisma migrate dev --name init",
+    "postinstall": "prisma generate",
+    "migrate": "prisma migrate deploy",
     "seed": "node prisma/seed.js"
   },
   "dependencies": {
-    "@prisma/client": "^5.18.0",
-    "bcrypt": "^5.1.1",
+    "express": "^4.19.2",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
-    "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
-    "zod": "^3.23.8"
+    "bcryptjs": "^2.4.3",
+    "zod": "^3.23.8",
+    "@prisma/client": "^5.18.0"
   },
   "devDependencies": {
-    "prisma": "^5.18.0"
+    "prisma": "^5.18.0",
+    "nodemon": "^3.1.0"
   }
-
+}
