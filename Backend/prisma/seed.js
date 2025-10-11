@@ -1,29 +1,38 @@
-import { PrismaClient } from "@prisma/client";
+// Backend/prisma/seed.js
+import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 
-async function main() {
-  const defaults = [
-    { name: "Vendas", type: "REVENUE" },
-    { name: "Serviços", type: "REVENUE" },
-    { name: "CMV", type: "COST" },
-    { name: "Folha", type: "EXPENSE" },
-    { name: "Aluguel", type: "EXPENSE" },
-    { name: "Marketing", type: "EXPENSE" }
-  ];
-
-  for (const c of defaults) {
-    await prisma.category.upsert({
-      where: { name: c.name },
-      update: {},
-      create: c
-    });
-  }
-  console.log("✅ Seed ok");
+// Por que: rodar sem travar deploy. Usa findFirst para evitar depender de índice único.
+async function upsertByName(model, data) {
+  const existing = await prisma[model].findFirst({ where: { name: data.name } });
+  if (!existing) return prisma[model].create({ data });
+  // só atualiza se mudou algo
+  const { id, ...rest } = existing;
+  const needsUpdate = Object.keys(data).some(k => data[k] !== rest[k]);
+  if (needsUpdate) return prisma[model].update({ where: { id }, data });
+  return existing;
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-}).finally(async () => {
-  await prisma.$disconnect();
-});
+async function main() {
+  const categories = [
+    { name: 'Vendas',         type: 'REVENUE' },
+    { name: 'Devoluções',     type: 'REVENUE' },
+    { name: 'CMV/Despesa',    type: 'COST' },
+    { name: 'Despesas Admin', type: 'EXPENSE' },
+    { name: 'Outras Operac.', type: 'EXPENSE' },
+  ];
+
+  for (const c of categories) await upsertByName('category', c);
+
+  // Usuário admin de exemplo (ajuste depois: hash de senha)
+  const admin = await prisma.user.findFirst({ where: { email: 'admin@dre.local' } });
+  if (!admin) {
+    await prisma.user.create({
+      data: { name: 'Admin', email: 'admin@dre.local', password: 'changeme' },
+    });
+  }
+}
+
+main()
+  .then(async () => { await prisma.$disconnect(); })
+  .catch(async (e) => { console.error(e); await prisma.$disconnect(); process.exit(1); });
