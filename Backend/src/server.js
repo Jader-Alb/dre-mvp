@@ -1,7 +1,8 @@
+// Backend/src/server.js
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
-import bcrypt from "bcrypt";
+import bcrypt from "bcryptjs";               // ← trocado (antes: 'bcrypt')
 import jwt from "jsonwebtoken";
 import { PrismaClient } from "@prisma/client";
 import { z } from "zod";
@@ -18,21 +19,26 @@ app.use(express.json());
 const registerSchema = z.object({
   name: z.string().min(1),
   email: z.string().email(),
-  password: z.string().min(6)
+  password: z.string().min(6),
 });
 const loginSchema = z.object({
   email: z.string().email(),
-  password: z.string().min(6)
+  password: z.string().min(6),
 });
 const categorySchema = z.object({
   name: z.string().min(1),
-  type: z.enum(["REVENUE", "COST", "EXPENSE"])
+  type: z.enum(["REVENUE", "COST", "EXPENSE"]),
 });
 const transactionSchema = z.object({
   categoryId: z.number().int(),
   date: z.string().datetime().or(z.string().regex(/^\d{4}-\d{2}-\d{2}$/)),
   description: z.string().min(1),
-  amount: z.number()
+  amount: z.number(),
+});
+
+// health (útil p/ Render)
+app.get("/health", (_req, res) => {
+  res.json({ ok: true, uptime: process.uptime(), env: "production" });
 });
 
 // auth
@@ -102,7 +108,7 @@ app.get("/transactions", authMiddleware, async (req, res) => {
   const list = await prisma.transaction.findMany({
     where: { userId: req.user.id },
     include: { category: true },
-    orderBy: { date: "desc" }
+    orderBy: { date: "desc" },
   });
   res.json(list);
 });
@@ -114,7 +120,7 @@ app.post("/transactions", authMiddleware, async (req, res) => {
   const dt = date.length === 10 ? new Date(date + "T00:00:00") : new Date(date);
 
   const trx = await prisma.transaction.create({
-    data: { userId: req.user.id, categoryId, date: dt, description, amount }
+    data: { userId: req.user.id, categoryId, date: dt, description, amount },
   });
   res.status(201).json(trx);
 });
@@ -128,7 +134,7 @@ app.put("/transactions/:id", authMiddleware, async (req, res) => {
 
   try {
     const trx = await prisma.transaction.update({ where: { id }, data });
-    if (trx.userId !== req.user.id) return res.status(403).json({ error: "forbidden" });
+    if (trx.userId !== req.user.id) return res.status(403).json({ error: "forbidden" }); // Por quê: não expor dados de outro usuário
     res.json(trx);
   } catch {
     res.status(404).json({ error: "lançamento não encontrado" });
@@ -152,7 +158,7 @@ app.get("/dre", authMiddleware, async (req, res) => {
 
   const rows = await prisma.transaction.findMany({
     where: { userId: req.user.id, date: { gte: from, lte: to } },
-    include: { category: true }
+    include: { category: true },
   });
 
   const sum = { REVENUE: 0, COST: 0, EXPENSE: 0 };
@@ -167,7 +173,7 @@ app.get("/dre", authMiddleware, async (req, res) => {
   res.json({
     period: { from, to },
     totals: { receitaBruta, custo, lucroBruto, despesa, resultado },
-    breakdown: sum
+    breakdown: sum,
   });
 });
 
